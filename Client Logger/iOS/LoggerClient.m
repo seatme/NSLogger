@@ -1,7 +1,7 @@
 /*
  * LoggerClient.m
  *
- * version 1.0 2011-08-06
+ * version 1.0 2011-10-30
  *
  * Main implementation of the NSLogger client side code
  * Part of NSLogger (client side)
@@ -113,6 +113,28 @@
 	#define LOGGERDBG(format, ...) do{}while(0)
 	#define LOGGERDBG2(format, ...) do{}while(0)
 #endif
+
+// small set of macros for proper ARC/non-ARC compilation support
+// with added cruft to support non-clang compilers
+#undef LOGGER_ARC_MACROS_DEFINED
+#if defined(__has_feature)
+	#if __has_feature(objc_arc)
+		#define CAST_TO_CFSTRING			__bridge CFStringRef
+		#define CAST_TO_CFDATA				__bridge CFDataRef
+		#define RELEASE(obj)				do{}while(0)
+		#define AUTORELEASE_POOL_BEGIN		@autoreleasepool{
+		#define AUTORELEASE_POOL_END		}
+		#define LOGGER_ARC_MACROS_DEFINED
+	#endif
+#endif
+#if !defined(LOGGER_ARC_MACROS_DEFINED)
+	#define CAST_TO_CFSTRING			CFStringRef
+	#define CAST_TO_CFDATA				CFDataRef
+	#define RELEASE(obj)				[obj release]
+	#define AUTORELEASE_POOL_BEGIN		NSAutoreleasePool *__pool=[[NSAutoreleasePool alloc] init];
+	#define AUTORELEASE_POOL_END		[__pool drain];
+#endif
+#undef LOGGER_ARC_MACROS_DEFINED
 
 /* Local prototypes */
 static void* LoggerWorkerThread(Logger *logger);
@@ -355,7 +377,7 @@ void LoggerStop(Logger *logger)
 
 		// to make sure potential errors are catched, set the whole structure
 		// to a value that will make code crash if it tries using pointers to it.
-		memset(logger, 0x55, sizeof(*logger));
+		memset(logger, 0x55, sizeof(Logger));
 
 		free(logger);
 	}
@@ -385,7 +407,7 @@ static void LoggerDbg(CFStringRef format, ...)
 	// (what do you think, that we use the Logger to debug itself ??)
 	if (format != NULL)
 	{
-		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+		AUTORELEASE_POOL_BEGIN
 		va_list	args;	
 		va_start(args, format);
 		CFStringRef s = CFStringCreateWithFormatAndArguments(NULL, NULL, (CFStringRef)format, args);
@@ -395,7 +417,7 @@ static void LoggerDbg(CFStringRef format, ...)
 			CFShow(s);
 			CFRelease(s);
 		}
-		[pool drain];
+		AUTORELEASE_POOL_END
 	}
 }
 
@@ -1328,11 +1350,27 @@ static BOOL LoggerConfigureAndOpenStream(Logger *logger)
 				kCFStreamSSLPeerName
 			};
 			const void *SSLValues[] = {
-				kCFStreamSocketSecurityLevelSSLv3,
+				kCFStreamSocketSecurityLevelNegotiatedSSL,
 				kCFBooleanFalse,			// no certificate chain validation (we use a self-signed certificate)
 				kCFBooleanFalse,			// not a server
 				kCFNull
 			};
+			
+#if TARGET_OS_IPHONE
+			// workaround for TLS in iOS 5 as per TN2287
+			// see http://developer.apple.com/library/ios/#technotes/tn2287/_index.html#//apple_ref/doc/uid/DTS40011309
+			// if we are running iOS 5 or later, use a special mode that allows the stack to downgrade gracefully
+	#if ALLOW_COCOA_USE
+			NSString *versionString = [[UIDevice currentDevice] systemVersion];
+			if ([versionString compare:@"5.0" options:NSNumericSearch] != NSOrderedAscending)
+				SSLValues[0] = CFSTR("kCFStreamSocketSecurityLevelTLSv1_0SSLv3");
+	#else
+			// we can't find out, assume we _may_ be on iOS 5 but can't be certain
+			// go for SSLv3 which works without the TLS 1.2 / 1.1 / 1.0 downgrade issue
+			SSLValues[0] = kCFStreamSocketSecurityLevelSSLv3;
+	#endif
+#endif
+
 			CFDictionaryRef SSLDict = CFDictionaryCreate(NULL, SSLKeys, SSLValues, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 			CFWriteStreamSetProperty(logger->logStream, kCFStreamPropertySSLSettings, SSLDict);
 			CFRelease(SSLDict);
@@ -1545,7 +1583,7 @@ static void LoggerMessageAddTimestampAndThreadID(CFMutableDataRef encoder)
 	// and for which Cocoa's multithreading has not been activated. We test for this case.
 	if ([NSThread isMultiThreaded] || [NSThread isMainThread])
 	{
-		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+		AUTORELEASE_POOL_BEGIN
 		NSThread *thread = [NSThread currentThread];
 		NSString *name = [thread name];
 		if (![name length])
@@ -1566,10 +1604,10 @@ static void LoggerMessageAddTimestampAndThreadID(CFMutableDataRef encoder)
 		}
 		if (name != nil)
 		{
-			LoggerMessageAddString(encoder, (CFStringRef)name, PART_KEY_THREAD_ID);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)name, PART_KEY_THREAD_ID);
 			hasThreadName = YES;
 		}
-		[pool drain];
+		AUTORELEASE_POOL_END
 	}
 #endif
 	if (!hasThreadName)
@@ -1773,13 +1811,13 @@ static void	LoggerPushClientInfoToFrontOfQueue(Logger *logger)
 #if TARGET_OS_IPHONE && ALLOW_COCOA_USE
 		if ([NSThread isMultiThreaded] || [NSThread isMainThread])
 		{
-			NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+			AUTORELEASE_POOL_BEGIN
 			UIDevice *device = [UIDevice currentDevice];
-			LoggerMessageAddString(encoder, (CFStringRef)device.uniqueIdentifier, PART_KEY_UNIQUEID);
-			LoggerMessageAddString(encoder, (CFStringRef)device.systemVersion, PART_KEY_OS_VERSION);
-			LoggerMessageAddString(encoder, (CFStringRef)device.systemName, PART_KEY_OS_NAME);
-			LoggerMessageAddString(encoder, (CFStringRef)device.model, PART_KEY_CLIENT_MODEL);
-			[pool release];
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.uniqueIdentifier, PART_KEY_UNIQUEID);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.systemVersion, PART_KEY_OS_VERSION);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.systemName, PART_KEY_OS_NAME);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.model, PART_KEY_CLIENT_MODEL);
+			AUTORELEASE_POOL_END
 		}
 #elif TARGET_OS_MAC
 		SInt32 versionMajor, versionMinor, versionFix;
@@ -1885,7 +1923,7 @@ static void LogMessageTo_internal(Logger *logger,
 		LoggerMessageAddInt32(encoder, LOGMSG_TYPE_LOG, PART_KEY_MESSAGE_TYPE);
 		LoggerMessageAddInt32(encoder, seq, PART_KEY_MESSAGE_SEQ);
 		if (domain != nil && [domain length])
-			LoggerMessageAddString(encoder, (CFStringRef)domain, PART_KEY_TAG);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)domain, PART_KEY_TAG);
 		if (level)
 			LoggerMessageAddInt32(encoder, level, PART_KEY_LEVEL);
 		if (filename != NULL)
@@ -1900,8 +1938,8 @@ static void LogMessageTo_internal(Logger *logger,
 		NSString *msgString = [[NSString alloc] initWithFormat:format arguments:args];
 		if (msgString != nil)
 		{
-			LoggerMessageAddString(encoder, (CFStringRef)msgString, PART_KEY_MESSAGE);
-			[msgString release];
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)msgString, PART_KEY_MESSAGE);
+			RELEASE(msgString);
 		}
 #else
 		CFStringRef msgString = CFStringCreateWithFormatAndArguments(NULL, NULL, (CFStringRef)format, args);
@@ -1947,7 +1985,7 @@ static void LogImageTo_internal(Logger *logger,
 		LoggerMessageAddInt32(encoder, LOGMSG_TYPE_LOG, PART_KEY_MESSAGE_TYPE);
 		LoggerMessageAddInt32(encoder, seq, PART_KEY_MESSAGE_SEQ);
 		if (domain != nil && [domain length])
-			LoggerMessageAddString(encoder, (CFStringRef)domain, PART_KEY_TAG);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)domain, PART_KEY_TAG);
 		if (level)
 			LoggerMessageAddInt32(encoder, level, PART_KEY_LEVEL);
 		if (width && height)
@@ -1961,7 +1999,7 @@ static void LogImageTo_internal(Logger *logger,
 			LoggerMessageAddInt32(encoder, lineNumber, PART_KEY_LINENUMBER);
 		if (functionName != NULL)
 			LoggerMessageAddCString(encoder, functionName, PART_KEY_FUNCTIONNAME);
-		LoggerMessageAddData(encoder, (CFDataRef)data, PART_KEY_MESSAGE, PART_TYPE_IMAGE);
+		LoggerMessageAddData(encoder, (CAST_TO_CFDATA)data, PART_KEY_MESSAGE, PART_TYPE_IMAGE);
 
 		LoggerPushMessageToQueue(logger, encoder);
 		CFRelease(encoder);
@@ -1995,7 +2033,7 @@ static void LogDataTo_internal(Logger *logger,
 		LoggerMessageAddInt32(encoder, LOGMSG_TYPE_LOG, PART_KEY_MESSAGE_TYPE);
 		LoggerMessageAddInt32(encoder, seq, PART_KEY_MESSAGE_SEQ);
 		if (domain != nil && [domain length])
-			LoggerMessageAddString(encoder, (CFStringRef)domain, PART_KEY_TAG);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)domain, PART_KEY_TAG);
 		if (level)
 			LoggerMessageAddInt32(encoder, level, PART_KEY_LEVEL);
 		if (filename != NULL)
@@ -2004,7 +2042,7 @@ static void LogDataTo_internal(Logger *logger,
 			LoggerMessageAddInt32(encoder, lineNumber, PART_KEY_LINENUMBER);
 		if (functionName != NULL)
 			LoggerMessageAddCString(encoder, functionName, PART_KEY_FUNCTIONNAME);
-		LoggerMessageAddData(encoder, (CFDataRef)data, PART_KEY_MESSAGE, PART_TYPE_BINARY);
+		LoggerMessageAddData(encoder, (CAST_TO_CFDATA)data, PART_KEY_MESSAGE, PART_TYPE_BINARY);
 		
 		LoggerPushMessageToQueue(logger, encoder);
 		CFRelease(encoder);
@@ -2033,10 +2071,9 @@ static void LogStartBlockTo_internal(Logger *logger, NSString *format, va_list a
 		LoggerMessageAddInt32(encoder, LOGMSG_TYPE_BLOCKSTART, PART_KEY_MESSAGE_TYPE);
 		LoggerMessageAddInt32(encoder, seq, PART_KEY_MESSAGE_SEQ);
 
-		CFStringRef msgString = NULL;
 		if (format != nil)
 		{
-			msgString = CFStringCreateWithFormatAndArguments(NULL, NULL, (CFStringRef)format, args);
+			CFStringRef msgString = CFStringCreateWithFormatAndArguments(NULL, NULL, (CAST_TO_CFSTRING)format, args);
 			if (msgString != NULL)
 			{
 				LoggerMessageAddString(encoder, msgString, PART_KEY_MESSAGE);
@@ -2229,7 +2266,7 @@ void LogMarkerTo(Logger *logger, NSString *text)
 		}
 		else
 		{
-			LoggerMessageAddString(encoder, (CFStringRef)text, PART_KEY_MESSAGE);
+			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)text, PART_KEY_MESSAGE);
 		}
 		LoggerMessageAddInt32(encoder, seq, PART_KEY_MESSAGE_SEQ);
 		LoggerPushMessageToQueue(logger, encoder);
