@@ -1813,8 +1813,11 @@ static void	LoggerPushClientInfoToFrontOfQueue(Logger *logger)
 		{
 			AUTORELEASE_POOL_BEGIN
 			UIDevice *device = [UIDevice currentDevice];
-			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.uniqueIdentifier, PART_KEY_UNIQUEID);
-			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.systemVersion, PART_KEY_OS_VERSION);
+#if 0
+            // Disabling this part of the logger - deprecated and not neccessary
+            LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.uniqueIdentifier, PART_KEY_UNIQUEID);
+#endif		
+            LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.systemVersion, PART_KEY_OS_VERSION);
 			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.systemName, PART_KEY_OS_NAME);
 			LoggerMessageAddString(encoder, (CAST_TO_CFSTRING)device.model, PART_KEY_CLIENT_MODEL);
 			AUTORELEASE_POOL_END
